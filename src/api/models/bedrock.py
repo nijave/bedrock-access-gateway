@@ -106,11 +106,15 @@ def list_bedrock_models() -> dict:
         app_profile_dict = {}
         
         if ENABLE_CROSS_REGION_INFERENCE:
+            logger.info("Enabling cross region inference")
             # List system defined inference profile IDs
             response = bedrock_client.list_inference_profiles(maxResults=1000, typeEquals="SYSTEM_DEFINED")
-            profile_list = [p["inferenceProfileId"] for p in response["inferenceProfileSummaries"]]
+            for p in response["inferenceProfileSummaries"]:
+                logger.info("Enabling %s", p["inferenceProfileId"])
+                profile_list.append(p["inferenceProfileId"])
 
         if ENABLE_APPLICATION_INFERENCE_PROFILES:
+            logger.info("Enabling application inference profiles")
             # List application defined inference profile IDs and create mapping
             response = bedrock_client.list_inference_profiles(maxResults=1000, typeEquals="APPLICATION")
             
@@ -132,6 +136,9 @@ def list_bedrock_models() -> dict:
                     logger.warning(f"Error processing application profile: {e}")
                     continue
 
+        logger.info("Profile list: %s", profile_list)
+        logger.info("App profile dict: %s", app_profile_dict)
+
         # List foundation models, only cares about text outputs here.
         response = bedrock_client.list_foundation_models(byOutputModality="TEXT")
 
@@ -141,7 +148,11 @@ def list_bedrock_models() -> dict:
             status = model["modelLifecycle"].get("status", "ACTIVE")
 
             # currently, use this to filter out rerank models and legacy models
-            if not stream_supported or status not in ["ACTIVE", "LEGACY"]:
+            if not stream_supported:
+                logger.warning("%s doesn't support streaming", model_id)
+                continue
+            if status not in ["ACTIVE", "LEGACY"]:
+                logger.warning("%s has invalid status %s", model_id, status)
                 continue
 
             inference_types = model.get("inferenceTypesSupported", [])

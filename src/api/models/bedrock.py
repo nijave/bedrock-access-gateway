@@ -1077,6 +1077,11 @@ class BedrockModel(BaseChatModel):
                         )
                     ]
                 )
+                # Models such as Kimi and GLM go straight from reasoning to a tool call,
+                # so close the thinking tag here rather than after the call.
+                if self.think_emitted:
+                    message.content = "</think>"
+                    self.think_emitted = False
 
         if "contentBlockDelta" in chunk:
             delta = chunk["contentBlockDelta"]["delta"]
@@ -1143,22 +1148,10 @@ class BedrockModel(BaseChatModel):
                 )
 
         if "messageStop" in chunk:
-            # Safety check: Close any open thinking tags before message stops
-            if self.think_emitted:
-                self.think_emitted = False
-                return ChatStreamResponse(
-                    id=message_id,
-                    model=model_id,
-                    choices=[
-                        ChoiceDelta(
-                            index=0,
-                            delta=ChatResponseMessage(content="</think>"),
-                            logprobs=None,
-                            finish_reason=None,
-                        )
-                    ],
-                )
-            message = ChatResponseMessage()
+            # Close a thinking tag that is still open in the same chunk as the finish
+            # reason, which clients need to act on a tool call.
+            message = ChatResponseMessage(content="</think>") if self.think_emitted else ChatResponseMessage()
+            self.think_emitted = False
             finish_reason = chunk["messageStop"]["stopReason"]
 
         if "metadata" in chunk:

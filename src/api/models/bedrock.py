@@ -500,9 +500,11 @@ class BedrockModel(BaseChatModel):
         for message in chat_request.messages:
             if message.role not in ("system", "developer"):
                 continue
-            if not isinstance(message.content, str):
-                raise TypeError(f"System message content must be a string, got {type(message.content).__name__}")
-            system_prompts.append({"text": message.content})
+            if isinstance(message.content, str):
+                system_prompts.append({"text": message.content})
+            else:
+                # A list of text parts, as the OpenAI API allows for system and developer messages.
+                system_prompts.extend({"text": part.text} for part in message.content)
 
         if not system_prompts:
             return system_prompts

@@ -934,7 +934,8 @@ class BedrockModel(BaseChatModel):
         reasoning_text = ""
         for block in content:
             if "reasoningContent" in block:
-                reasoning_text += block["reasoningContent"]["reasoningText"].get("text", "")
+                # A block holds either reasoningText or redactedContent, which has no text.
+                reasoning_text += block["reasoningContent"].get("reasoningText", {}).get("text", "")
 
         if reasoning_text:
             # Use tiktoken to estimate token count
@@ -978,7 +979,10 @@ class BedrockModel(BaseChatModel):
             message.content = ""
             for c in content:
                 if "reasoningContent" in c:
-                    message.reasoning_content = c["reasoningContent"]["reasoningText"].get("text", "")
+                    # A block holds either reasoningText or redactedContent. Redacted
+                    # reasoning has no text to return, so it is skipped.
+                    if "reasoningText" in c["reasoningContent"]:
+                        message.reasoning_content = c["reasoningContent"]["reasoningText"].get("text", "")
                 elif "text" in c:
                     message.content = c["text"]
                 else:

@@ -980,7 +980,8 @@ class BedrockModel(BaseChatModel):
                 if "reasoningContent" in c:
                     message.reasoning_content = c["reasoningContent"]["reasoningText"].get("text", "")
                 elif "text" in c:
-                    message.content = c["text"]
+                    # A response can hold more than one text block, keep them all.
+                    message.content += c["text"]
                 else:
                     logger.warning("Unknown tag in message content " + ",".join(c.keys()))
             if message.reasoning_content:

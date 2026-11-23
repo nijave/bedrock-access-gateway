@@ -59,3 +59,72 @@ def test_reasoning_left_open_at_message_stop_is_closed_with_the_finish_reason(mo
     assert last.delta.content == "</think>"
     assert last.finish_reason == "stop"
     assert model.think_emitted is False
+
+
+def _tool_call_deltas(responses):
+    return [tc for r in responses for tc in (r.choices[0].delta.tool_calls or [])]
+
+
+def test_tool_call_as_the_first_block_gets_index_zero(model):
+    responses = _stream(
+        model,
+        [
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "c1", "name": "f"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": '{"a": 1}'}}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"messageStop": {"stopReason": "tool_use"}},
+        ],
+    )
+
+    assert {tc.index for tc in _tool_call_deltas(responses)} == {0}
+
+
+def test_tool_call_indexes_count_only_tool_blocks(model):
+    responses = _stream(
+        model,
+        [
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"text": "Checking."}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+            {"contentBlockStart": {"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "c1", "name": "f"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 1, "delta": {"toolUse": {"input": "{}"}}}},
+            {"contentBlockStop": {"contentBlockIndex": 1}},
+            {"contentBlockStart": {"contentBlockIndex": 2, "start": {"toolUse": {"toolUseId": "c2", "name": "g"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 2, "delta": {"toolUse": {"input": "{}"}}}},
+            {"contentBlockStop": {"contentBlockIndex": 2}},
+            {"messageStop": {"stopReason": "tool_use"}},
+        ],
+        model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",
+    )
+
+    starts = [tc for tc in _tool_call_deltas(responses) if tc.id]
+    assert [(tc.id, tc.index) for tc in starts] == [("c1", 0), ("c2", 1)]
+
+
+def test_empty_argument_deltas_are_dropped_so_arguments_stay_valid_json(model):
+    responses = _stream(
+        model,
+        [
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "c1", "name": "f"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": ""}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": '{"a": '}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": "1}"}}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+        ],
+    )
+
+    arguments = "".join(tc.function.arguments or "" for tc in _tool_call_deltas(responses))
+    assert arguments == '{"a": 1}'
+
+
+def test_tool_call_without_arguments_gets_an_empty_object(model):
+    responses = _stream(
+        model,
+        [
+            {"contentBlockStart": {"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "c1", "name": "f"}}}},
+            {"contentBlockDelta": {"contentBlockIndex": 0, "delta": {"toolUse": {"input": ""}}}},
+            {"contentBlockStop": {"contentBlockIndex": 0}},
+        ],
+    )
+
+    arguments = "".join(tc.function.arguments or "" for tc in _tool_call_deltas(responses))
+    assert arguments == "{}"

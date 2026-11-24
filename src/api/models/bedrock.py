@@ -453,6 +453,9 @@ class BedrockModel(BaseChatModel):
             message_id = self.generate_message_id()
             stream = response.get("stream")
             self.think_emitted = False
+            self._tool_call_index_map = {}  # contentBlockIndex -> 0-based tool_calls index
+            self._next_tool_index = 0
+            self._tool_call_has_args = {}  # contentBlockIndex -> True if non-empty args received
             reasoning_tokens = 0
             async for chunk in self._async_iterate(stream):
                 # Accumulate reasoning tokens from delta chunks before processing
@@ -1066,8 +1069,15 @@ class BedrockModel(BaseChatModel):
             # tool call start
             delta = chunk["contentBlockStart"]["start"]
             if "toolUse" in delta:
-                # first index is content
-                index = chunk["contentBlockStart"]["contentBlockIndex"] - 1
+                # Map Bedrock contentBlockIndex to sequential 0-based tool_calls index.
+                # Bedrock numbers ALL content blocks (text, reasoning, tool_use) with
+                # contentBlockIndex, but OpenAI tool_calls[].index must be 0-based
+                # across tool calls only.  The old ``- 1`` assumed index-0 is always
+                # text, which fails when the model emits a tool call first (index=-1).
+                block_idx = chunk["contentBlockStart"]["contentBlockIndex"]
+                index = self._next_tool_index
+                self._tool_call_index_map[block_idx] = index
+                self._next_tool_index += 1
                 message = ChatResponseMessage(
                     tool_calls=[
                         ToolCall(
@@ -1081,6 +1091,11 @@ class BedrockModel(BaseChatModel):
                         )
                     ]
                 )
+                # Models such as Kimi and GLM go straight from reasoning to a tool call,
+                # so close the thinking tag here rather than after the call.
+                if self.think_emitted:
+                    message.content = "</think>"
+                    self.think_emitted = False
 
         if "contentBlockDelta" in chunk:
             delta = chunk["contentBlockDelta"]["delta"]
@@ -1108,36 +1123,49 @@ class BedrockModel(BaseChatModel):
                     else:
                         return None  # Ignore signature if no <think> started
             else:
-                # tool use
-                index = chunk["contentBlockDelta"]["contentBlockIndex"] - 1
+                # tool use delta — look up the 0-based tool index we assigned at start
+                block_idx = chunk["contentBlockDelta"]["contentBlockIndex"]
+                index = self._tool_call_index_map.get(block_idx, 0)
+                tool_arguments = delta["toolUse"]["input"]
+                # Skip empty initial delta that Bedrock sends before actual JSON.
+                # We track non-empty deltas to detect no-arg tool calls; the
+                # synthetic "{}" is emitted at contentBlockStop if needed.
+                if tool_arguments:
+                    self._tool_call_has_args[block_idx] = True
+                    message = ChatResponseMessage(
+                        tool_calls=[
+                            ToolCall(
+                                index=index,
+                                function=ResponseFunction(
+                                    arguments=tool_arguments,
+                                ),
+                            )
+                        ]
+                    )
+
+        if "contentBlockStop" in chunk:
+            # If a tool call block ended with no non-empty argument deltas,
+            # emit a synthetic "{}" so clients (e.g. pipecat) that require
+            # truthy arguments see valid empty-object JSON.
+            block_idx = chunk["contentBlockStop"]["contentBlockIndex"]
+            if block_idx in self._tool_call_index_map and not self._tool_call_has_args.get(block_idx, False):
+                tool_idx = self._tool_call_index_map[block_idx]
                 message = ChatResponseMessage(
                     tool_calls=[
                         ToolCall(
-                            index=index,
+                            index=tool_idx,
                             function=ResponseFunction(
-                                arguments=delta["toolUse"]["input"],
+                                arguments="{}",
                             ),
                         )
                     ]
                 )
 
         if "messageStop" in chunk:
-            # Safety check: Close any open thinking tags before message stops
-            if self.think_emitted:
-                self.think_emitted = False
-                return ChatStreamResponse(
-                    id=message_id,
-                    model=model_id,
-                    choices=[
-                        ChoiceDelta(
-                            index=0,
-                            delta=ChatResponseMessage(content="</think>"),
-                            logprobs=None,
-                            finish_reason=None,
-                        )
-                    ],
-                )
-            message = ChatResponseMessage()
+            # Close a thinking tag that is still open in the same chunk as the finish
+            # reason, which clients need to act on a tool call.
+            message = ChatResponseMessage(content="</think>") if self.think_emitted else ChatResponseMessage()
+            self.think_emitted = False
             finish_reason = chunk["messageStop"]["stopReason"]
 
         if "metadata" in chunk:

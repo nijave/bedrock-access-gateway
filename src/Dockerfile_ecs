@@ -9,9 +9,14 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY ./requirements.txt /app/requirements.txt
-
-RUN pip install --no-cache-dir --upgrade -r /app/requirements.txt
+# Install the exact versions in uv.lock, with hashes checked, into the system
+# Python. uv and the lock files are mounted for this step only.
+RUN --mount=from=ghcr.io/astral-sh/uv:0.13.9,source=/uv,target=/bin/uv \
+    --mount=type=bind,source=pyproject.toml,target=/tmp/uv-project/pyproject.toml \
+    --mount=type=bind,source=uv.lock,target=/tmp/uv-project/uv.lock \
+    uv export --project /tmp/uv-project --frozen --no-emit-project --no-dev -o /tmp/requirements.txt && \
+    uv pip install --system --no-cache --require-hashes -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
 
 COPY ./api /app/api
 

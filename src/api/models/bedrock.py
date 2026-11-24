@@ -575,6 +575,10 @@ class BedrockModel(BaseChatModel):
         https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html#message-inference-examples
         """
         messages = []
+        # Bedrock rejects toolUse/toolResult blocks when no toolConfig is sent,
+        # so tool history is kept as plain text when tools are disabled.
+        tools_disabled = self._tools_disabled(chat_request)
+        tool_names = {}  # tool call id -> tool name, to label tool results
         for message in chat_request.messages:
             if isinstance(message, UserMessage):
                 messages.append(
@@ -601,10 +605,36 @@ class BedrockModel(BaseChatModel):
                             "content": self._parse_content_parts(message, chat_request.model),
                         }
                     )
-                if message.tool_calls:
+                if message.tool_calls and tools_disabled:
+                    # Tool use as text. Arguments are passed through as received,
+                    # they may be incomplete JSON if the tool call was cut off.
+                    for tool_call in message.tool_calls:
+                        tool_names[tool_call.id] = tool_call.function.name
+                        tool_text = f"[Tool call: {tool_call.function.name}({tool_call.function.arguments})]"
+                        messages.append(
+                            {
+                                "role": message.role,
+                                "content": [{"text": tool_text}],
+                            }
+                        )
+                elif message.tool_calls:
                     # Tool use message
                     for tool_call in message.tool_calls:
-                        tool_input = json.loads(tool_call.function.arguments)
+                        try:
+                            tool_input = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            tool_input = None
+                        if not isinstance(tool_input, dict):
+                            # Empty or cut-off arguments (e.g. the call hit the token limit).
+                            # Converse requires toolUse input to be an object and the paired
+                            # toolResult only refers to the call by id, so an empty object keeps
+                            # the pair valid instead of failing every later turn of the chat.
+                            logger.warning(
+                                "Tool call %s (%s) has arguments that are not a JSON object, sending {} instead",
+                                tool_call.id,
+                                tool_call.function.name,
+                            )
+                            tool_input = {}
                         messages.append(
                             {
                                 "role": message.role,
@@ -627,6 +657,17 @@ class BedrockModel(BaseChatModel):
                 # Handle different content formats from OpenAI SDK
                 tool_content = self._extract_tool_content(message.content)
 
+                if tools_disabled:
+                    # Tool result as text in a user message
+                    tool_label = tool_names.get(message.tool_call_id) or message.tool_call_id
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [{"text": f"[Tool result for {tool_label}]: {tool_content}"}],
+                        }
+                    )
+                    continue
+
                 messages.append(
                     {
                         "role": "user",
@@ -645,6 +686,16 @@ class BedrockModel(BaseChatModel):
                 # ignore others, such as system messages
                 continue
         return self._reframe_multi_payloard(messages, chat_request)
+
+    @staticmethod
+    def _tools_disabled(chat_request: ChatRequest) -> bool:
+        """Tools are disabled when none are offered or tool_choice is "none".
+
+        Converse has no "none" tool choice, and it rejects toolUse/toolResult
+        blocks unless toolConfig is set. So in this case no toolConfig is sent
+        and any tool history is converted to plain text (see _parse_messages).
+        """
+        return not chat_request.tools or chat_request.tool_choice == "none"
 
     def _extract_tool_content(self, content) -> str:
         """Extract text content from various OpenAI SDK tool message formats.
@@ -878,7 +929,7 @@ class BedrockModel(BaseChatModel):
                 if DEBUG:
                     logger.info(f"reasoning_effort parameter ignored for model {chat_request.model} (not supported)")
         # add tool config
-        if chat_request.tools:
+        if not self._tools_disabled(chat_request):
             tool_config = {"tools": [self._convert_tool_spec(t.function) for t in chat_request.tools]}
 
             if chat_request.tool_choice and not chat_request.model.startswith("meta.llama3-1-"):

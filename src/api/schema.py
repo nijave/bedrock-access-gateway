@@ -53,7 +53,7 @@ class ToolContent(BaseModel):
 class SystemMessage(BaseModel):
     name: str | None = None
     role: Literal["system"] = "system"
-    content: str
+    content: str | list[TextContent]
 
 
 class UserMessage(BaseModel):
@@ -78,7 +78,7 @@ class ToolMessage(BaseModel):
 class DeveloperMessage(BaseModel):
     name: str | None = None
     role: Literal["developer"] = "developer"
-    content: str
+    content: str | list[TextContent]
 
 
 class Function(BaseModel):
